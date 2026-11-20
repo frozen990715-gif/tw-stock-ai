@@ -6,3 +6,12 @@ google-genai
 mplfinance
 pandas
 matplotlib
+streamlit
+yfinance
+requests
+beautifulsoup4
+google-genai
+mplfinance
+pandas
+matplotlib
+six
