@@ -3,13 +3,13 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 from google import genai
-import mplfinance as mpf
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="台股 AI 量化分析系統", page_icon="📈", layout="centered")
 st.title("📈 台股 AI 量化分析系統")
-st.caption("結合即時技術指標（K 線、MA20、RSI）、財經新聞爬蟲與 Gemini AI 短評")
+st.caption("結合互動式 K 線圖（MA20、成交量、RSI）、財經新聞爬蟲與 Gemini AI 短評")
 
 # 1. 使用者輸入介面
 col_input, col_btn = st.columns([3, 1])
@@ -68,7 +68,7 @@ if run_btn and raw_code:
         news_list = []
         for tag in soup.find_all("h3"):
             title = tag.get_text(strip=True)
-            if len(title) > 8 and title not in news_list:
+            if len(title) > 8 and "個股相關新聞與公告" not in title and title not in news_list:
                 news_list.append(title)
                 if len(news_list) >= 5:
                     break
@@ -80,31 +80,88 @@ if run_btn and raw_code:
     m2.metric("20 日均線 (MA20)", f"{latest_ma20:.2f}")
     m3.metric("RSI (14)", f"{latest_rsi:.2f}")
 
-    # 5. 繪製 K 線、成交量與 RSI 圖表
-    mc = mpf.make_marketcolors(up="#e74c3c", down="#2ecc71", edge="inherit", wick="inherit", volume="inherit")
-    style = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", gridcolor="#cccccc", y_on_right=False)
-    apds = [
-        mpf.make_addplot(df["MA20"], panel=0, color="#ff7f0e", width=1.6, secondary_y=False),
-        mpf.make_addplot(df["RSI"], panel=2, color="#9467bd", width=1.5, ylabel="RSI", ylim=(0, 100), secondary_y=False),
-        mpf.make_addplot(pd.Series(70, index=df.index), panel=2, color="red", linestyle=":", width=1, secondary_y=False),
-        mpf.make_addplot(pd.Series(30, index=df.index), panel=2, color="green", linestyle=":", width=1, secondary_y=False),
-    ]
-    fig, _ = mpf.plot(
-        df,
-        type="candle",
-        style=style,
-        volume=True,
-        addplot=apds,
-        panel_ratios=(4, 1.2, 1.5),
-        title=f"\n{stock_id} - K-Line, MA20 (Orange) & RSI",
-        ylabel="Price (TWD)",
-        ylabel_lower="Volume",
-        figsize=(10, 7),
-        tight_layout=True,
-        returnfig=True,
+    # 5. 繪製互動式三層 K 線圖（Plotly）
+    dates = df.index.strftime("%Y-%m-%d")
+    vol_colors = ["#e74c3c" if c >= o else "#2ecc71" for c, o in zip(df["Close"], df["Open"])]
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.58, 0.18, 0.24],
+        subplot_titles=(f"{stock_name} ({stock_id}) K 線與 20 日均線", "成交量", "RSI (14)")
     )
-    st.pyplot(fig)
-    plt.close(fig)
+
+    # 上層：台股紅漲綠跌 K 線
+    fig.add_trace(
+        go.Candlestick(
+            x=dates,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="K 線",
+            increasing_line_color="#e74c3c",
+            increasing_fillcolor="#e74c3c",
+            decreasing_line_color="#2ecc71",
+            decreasing_fillcolor="#2ecc71",
+        ),
+        row=1, col=1
+    )
+
+    # 上層：20 日均線
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=df["MA20"],
+            mode="lines",
+            name="MA20 (月線)",
+            line=dict(color="#ff7f0e", width=1.8),
+        ),
+        row=1, col=1
+    )
+
+    # 中層：成交量
+    fig.add_trace(
+        go.Bar(
+            x=dates,
+            y=df["Volume"],
+            name="成交量",
+            marker_color=vol_colors,
+            opacity=0.8,
+        ),
+        row=2, col=1
+    )
+
+    # 下層：RSI 指標與 70/30 參考線
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=df["RSI"],
+            mode="lines",
+            name="RSI (14)",
+            line=dict(color="#9467bd", width=1.6),
+        ),
+        row=3, col=1
+    )
+    fig.add_hline(y=70, line_dash="dot", line_color="red", opacity=0.7, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="green", opacity=0.7, row=3, col=1)
+
+    # 互動與排版設定（自動跳過休市日）
+    fig.update_layout(
+        height=720,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="right", x=1),
+        margin=dict(l=10, r=10, t=55, b=10),
+    )
+    fig.update_xaxes(type="category", nticks=8)
+    fig.update_yaxes(title_text="價格 (TWD)", row=1, col=1)
+    fig.update_yaxes(title_text="量能", row=2, col=1)
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
 
     # 6. 顯示近期新聞
     with st.expander("📰 查看近期相關財經新聞", expanded=True):
