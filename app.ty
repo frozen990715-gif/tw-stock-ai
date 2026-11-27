@@ -1,0 +1,323 @@
+from datetime import datetime
+import time
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+import yfinance as yf
+
+st.set_page_config(
+    page_title="股票基本面、互動波動圖與 AI 買點分析",
+    layout="wide",
+)
+st.title("📈 股票基本面 × 互動波動圖 × AI 買點分析")
+
+# --- 側邊欄參數設定 ---
+with st.sidebar:
+  st.header("⚙️ 參數設定")
+  tickers_input = st.text_input(
+      "股票代號（以逗號分隔）",
+      value="2330.TW, SPY, NVDA",
+  )
+  start_date = st.date_input("歷史區間開始日期", value=datetime(2024, 1, 1))
+  use_today = st.checkbox("歷史區間結束日期使用今天", value=True)
+  custom_end_date = st.date_input(
+      "自訂歷史區間結束日期",
+      value=datetime.today(),
+      disabled=use_today,
+  )
+  window = st.number_input(
+      "移動平均天數 (Window)",
+      min_value=5,
+      max_value=500,
+      value=252,
+  )
+  intraday_interval = st.selectbox(
+      "當日波動圖時間顆粒",
+      options=["5m", "1m", "15m", "30m"],
+      index=0,
+      help="5m 適合觀察全日波動節奏；1m 細節最細但資料點較多。",
+  )
+  amplitude_threshold = st.number_input(
+      "當日振幅提醒門檻 (%)",
+      min_value=0.5,
+      max_value=30.0,
+      value=3.0,
+      step=0.5,
+      help="當（當日最高價 - 當日最低價）/ 當日最低價 達此百分比時，顯示盤中波動提醒。",
+  )
+  run_btn = st.button(
+      "🚀 開始分析",
+      type="primary",
+      use_container_width=True,
+  )
+
+  st.divider()
+  st.header("⏱️ 盤中自動刷新")
+  auto_refresh = st.checkbox(
+      "啟用自動刷新（定期更新當日波動圖）",
+      value=False,
+      help="開啟後會依設定間隔自動重新抓取各檔股票當日分時資料並更新畫面。",
+  )
+  refresh_interval = st.number_input(
+      "刷新間隔（秒）",
+      min_value=15,
+      max_value=600,
+      value=60,
+      step=15,
+      disabled=not auto_refresh,
+  )
+
+
+@st.cache_data(ttl=3600)
+def download_history_with_retry(
+    symbol: str, start: str, end: str, retries: int = 3
+) -> pd.DataFrame:
+  """安全下載歷史股價，含重試與 MultiIndex 欄位處理"""
+  for attempt in range(1, retries + 1):
+    try:
+      data = yf.download(
+          symbol,
+          start=start,
+          end=end,
+          progress=False,
+          auto_adjust=False,
+          threads=False,
+      )
+      if data is not None and not data.empty:
+        if isinstance(data.columns, pd.MultiIndex):
+          data.columns = data.columns.get_level_values(0)
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+          if col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors="coerce")
+        data = data.dropna(subset=["High", "Low", "Close"])
+        if not data.empty:
+          return data
+    except Exception:
+      pass
+    if attempt < retries:
+      time.sleep(2)
+  return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def download_intraday_data(
+    symbol: str, interval: str = "5m"
+) -> tuple[pd.DataFrame, str]:
+  """下載當日分時波動資料；若無當日資料則自動改抓近 5 日分時作備援"""
+  attempts = [
+      ("1d", interval, "當日盤中/最近交易日分時"),
+      ("5d", "15m" if interval in ("1m", "5m") else interval, "近 5 日分時（備援）"),
+  ]
+  for period, iv, label in attempts:
+    try:
+      df = yf.download(
+          symbol,
+          period=period,
+          interval=iv,
+          progress=False,
+          auto_adjust=False,
+          threads=False,
+      )
+      if df is not None and not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+          df.columns = df.columns.get_level_values(0)
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+          if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["High", "Low", "Close"])
+        if not df.empty:
+          if period == "1d":
+            last_day = df.index[-1].date()
+            day_df = df[df.index.date == last_day]
+            if not day_df.empty:
+              return day_df, f"{label}（{last_day}，間隔 {iv}）"
+          return df, f"{label}（間隔 {iv}）"
+    except Exception:
+      continue
+  return pd.DataFrame(), "無分時資料"
+
+
+@st.cache_data(ttl=3600)
+def get_fundamental_info(ticker_symbol: str) -> dict | None:
+  """抓取單一股票基本面指標與公司名稱"""
+  try:
+    stock = yf.Ticker(ticker_symbol)
+    info = stock.info or {}
+    bs = stock.balance_sheet
+
+    if not info and (bs is None or bs.empty):
+      return {
+          "company_name": ticker_symbol,
+          "col_title": ticker_symbol,
+          "metrics": ["無資料"] * 7,
+          "raw": {},
+      }
+
+    company_name = (
+        info.get("longName")
+        or info.get("shortName")
+        or ticker_symbol
+    )
+    short_name = info.get("shortName") or company_name
+
+    currency = info.get("currency", "")
+    sector = info.get("sector", "N/A")
+    industry = info.get("industry", "N/A")
+    company_nature = (
+        f"{sector} - {industry}"
+        if (sector and sector != "N/A") or (industry and industry != "N/A")
+        else "無資料"
+    )
+
+    eps = info.get("trailingEps", None)
+    eps_str = f"{eps:.2f} ({currency})" if isinstance(eps, (int, float)) else "N/A"
+
+    pe_ratio = info.get("trailingPE", None)
+    pe_str = f"{pe_ratio:.2f}" if isinstance(pe_ratio, (int, float)) else "N/A"
+
+    gross_margin = info.get("grossMargins", None)
+    gm_str = f"{gross_margin * 100:.2f}%" if isinstance(gross_margin, (int, float)) else "N/A"
+
+    profit_margin = info.get("profitMargins", None)
+    pm_str = f"{profit_margin * 100:.2f}%" if isinstance(profit_margin, (int, float)) else "N/A"
+
+    ca_str = "N/A"
+    debt_ratio_val = None
+    debt_ratio_str = "N/A"
+    if bs is not None and not bs.empty:
+      latest_bs = bs.iloc[:, 0]
+      if "Current Assets" in latest_bs and pd.notna(latest_bs["Current Assets"]):
+        ca_val = float(latest_bs["Current Assets"])
+        ca_str = f"{ca_val / 1e8:,.2f} 億 ({currency})"
+      if (
+          "Total Liabilities Net Minority Interest" in latest_bs
+          and "Total Assets" in latest_bs
+      ):
+        total_liab = latest_bs["Total Liabilities Net Minority Interest"]
+        total_assets = latest_bs["Total Assets"]
+        if (
+            pd.notna(total_liab)
+            and pd.notna(total_assets)
+            and float(total_assets) != 0
+        ):
+          debt_ratio_val = (float(total_liab) / float(total_assets)) * 100
+          debt_ratio_str = f"{debt_ratio_val:.2f}%"
+
+    col_title = f"{ticker_symbol} ({short_name})" if short_name else ticker_symbol
+
+    return {
+        "company_name": company_name,
+        "col_title": col_title,
+        "metrics": [
+            company_nature,
+            eps_str,
+            pe_str,
+            gm_str,
+            pm_str,
+            ca_str,
+            debt_ratio_str,
+        ],
+        "raw": {
+            "pe": pe_ratio if isinstance(pe_ratio, (int, float)) else None,
+            "gross_margin_pct": (gross_margin * 100) if isinstance(gross_margin, (int, float)) else None,
+            "profit_margin_pct": (profit_margin * 100) if isinstance(profit_margin, (int, float)) else None,
+            "debt_ratio_pct": debt_ratio_val,
+        },
+    }
+  except Exception:
+    return {
+        "company_name": ticker_symbol,
+        "col_title": ticker_symbol,
+        "metrics": ["無資料"] * 7,
+        "raw": {},
+    }
+
+
+def compute_analysis(df: pd.DataFrame, window: int) -> tuple[dict, pd.DataFrame]:
+  """計算歷史極值、布林通道指標與單檔分析摘要"""
+  work_df = df.copy()
+  absolute_high = float(work_df["High"].max())
+  absolute_low = float(work_df["Low"].min())
+  high_date = work_df["High"].idxmax().strftime("%Y-%m-%d")
+  low_date = work_df["Low"].idxmin().strftime("%Y-%m-%d")
+  current_price = float(work_df["Close"].iloc[-1])
+
+  has_enough_window = len(work_df) >= window
+  if has_enough_window:
+    work_df["SMA"] = work_df["Close"].rolling(window=window).mean()
+    work_df["STD"] = work_df["Close"].rolling(window=window).std()
+    work_df["Estimated_High"] = work_df["SMA"] + (2 * work_df["STD"])
+    work_df["Estimated_Low"] = work_df["SMA"] - (2 * work_df["STD"])
+
+    latest_sma_val = float(work_df["SMA"].iloc[-1])
+    latest_est_high_val = float(work_df["Estimated_High"].iloc[-1])
+    latest_est_low_val = float(work_df["Estimated_Low"].iloc[-1])
+
+    latest_sma = f"{latest_sma_val:.2f}"
+    latest_est_high = f"{latest_est_high_val:.2f}"
+    latest_est_low = f"{latest_est_low_val:.2f}"
+  else:
+    latest_sma_val = None
+    latest_est_high_val = None
+    latest_est_low_val = None
+    latest_sma = "資料不足"
+    latest_est_high = "資料不足"
+    latest_est_low = "資料不足"
+
+  summary = {
+      "最新收盤價": f"{current_price:.2f}",
+      "區間最高價": f"{absolute_high:.2f}",
+      "區間最高價日期": high_date,
+      "區間最低價": f"{absolute_low:.2f}",
+      "區間最低價日期": low_date,
+      f"基準均價 (SMA {window}日)": latest_sma,
+      "預估壓力高點 (+2SD)": latest_est_high,
+      "預估支撐低點 (-2SD)": latest_est_low,
+      "has_enough_window": has_enough_window,
+      "current_price_val": current_price,
+      "latest_sma_val": latest_sma_val,
+      "latest_est_high_val": latest_est_high_val,
+      "latest_est_low_val": latest_est_low_val,
+  }
+  return summary, work_df
+
+
+def evaluate_intraday_alert(
+    ticker_symbol: str,
+    company_name: str,
+    intra_df: pd.DataFrame,
+    threshold_pct: float,
+    est_high_2sd: float | None,
+    est_low_2sd: float | None,
+    has_bollinger: bool,
+) -> dict:
+  """彙整當日振幅與最新分時價對歷史布林通道（+2SD / -2SD）的突破/跌破狀態"""
+  label = f"{company_name}（{ticker_symbol}）"
+  if intra_df is None or intra_df.empty:
+    return {
+        "has_data": False,
+        "has_alert": False,
+        "amp_exceeded": False,
+        "broke_upper": False,
+        "broke_lower": False,
+        "amplitude_pct": 0.0,
+        "headline": f"目前無法取得 {label} 分時資料。",
+        "details": [],
+    }
+
+  day_high = float(intra_df["High"].max())
+  day_low = float(intra_df["Low"].min())
+  high_time = intra_df["High"].idxmax().strftime("%H:%M")
+  low_time = intra_df["Low"].idxmin().strftime("%H:%M")
+  latest_price = float(intra_df["Close"].iloc[-1])
+
+  amplitude_pts = day_high - day_low
+  amplitude_pct = (amplitude_pts / day_low * 100) if day_low != 0 else 0.0
+  amp_exceeded = amplitude_pct >= threshold_pct
+
+  dist_to_high_pct = ((day_high - latest_price) / day_high * 100) if day_high != 0 else 0.0
+  dist_from_low_pct = ((latest_price - day_low) / day_low * 100) if day_low != 0 else 0.0
+  range_pos_pct = (
+      ((latest_price
