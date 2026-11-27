@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 from google import genai
 import pandas as pd
 import plotly.graph_objects as go
@@ -56,8 +57,9 @@ if run_btn and raw_code:
         latest_ma20 = df["MA20"].iloc[-1]
         latest_rsi = df["RSI"].iloc[-1]
 
-        # 3. 抓取 Yahoo 股市新聞與中文名稱
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/news"
+        # 3. 抓取 Yahoo 股市新聞（含原文連結）與中文名稱
+        base_url = "https://tw.stock.yahoo.com"
+        url = f"{base_url}/quote/{stock_id}/news"
         headers = {"User-Agent": "Mozilla/5.0"}
         soup = BeautifulSoup(requests.get(url, headers=headers).text, "html.parser")
 
@@ -66,10 +68,15 @@ if run_btn and raw_code:
             stock_name = soup.title.text.split("(")[0].strip()
 
         news_list = []
+        seen_titles = set()
         for tag in soup.find_all("h3"):
             title = tag.get_text(strip=True)
-            if len(title) > 8 and "個股相關新聞與公告" not in title and title not in news_list:
-                news_list.append(title)
+            if len(title) > 8 and "個股相關新聞與公告" not in title and title not in seen_titles:
+                link_tag = tag.find("a") or tag.find_parent("a")
+                href = link_tag.get("href", "") if link_tag else ""
+                full_url = urljoin(base_url, href) if href else ""
+                news_list.append((title, full_url))
+                seen_titles.add(title)
                 if len(news_list) >= 5:
                     break
 
@@ -93,7 +100,6 @@ if run_btn and raw_code:
         subplot_titles=(f"{stock_name} ({stock_id}) K 線與 20 日均線", "成交量", "RSI (14)")
     )
 
-    # 上層：台股紅漲綠跌 K 線
     fig.add_trace(
         go.Candlestick(
             x=dates,
@@ -110,7 +116,6 @@ if run_btn and raw_code:
         row=1, col=1
     )
 
-    # 上層：20 日均線
     fig.add_trace(
         go.Scatter(
             x=dates,
@@ -122,7 +127,6 @@ if run_btn and raw_code:
         row=1, col=1
     )
 
-    # 中層：成交量
     fig.add_trace(
         go.Bar(
             x=dates,
@@ -134,7 +138,6 @@ if run_btn and raw_code:
         row=2, col=1
     )
 
-    # 下層：RSI 指標與 70/30 參考線
     fig.add_trace(
         go.Scatter(
             x=dates,
@@ -148,7 +151,6 @@ if run_btn and raw_code:
     fig.add_hline(y=70, line_dash="dot", line_color="red", opacity=0.7, row=3, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="green", opacity=0.7, row=3, col=1)
 
-    # 互動與排版設定（自動跳過休市日）
     fig.update_layout(
         height=720,
         xaxis_rangeslider_visible=False,
@@ -163,11 +165,14 @@ if run_btn and raw_code:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # 6. 顯示近期新聞
-    with st.expander("📰 查看近期相關財經新聞", expanded=True):
+    # 6. 顯示近期新聞（可點擊連結）
+    with st.expander("📰 查看近期相關財經新聞（點擊標題看原文）", expanded=True):
         if news_list:
-            for i, title in enumerate(news_list, 1):
-                st.write(f"{i}. {title}")
+            for i, (title, link) in enumerate(news_list, 1):
+                if link:
+                    st.markdown(f"{i}. [{title}]({link})")
+                else:
+                    st.write(f"{i}. {title}")
         else:
             st.write("暫時沒有抓到新聞標題，將改以純技術面進行分析。")
 
@@ -176,7 +181,7 @@ if run_btn and raw_code:
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
             client = genai.Client(api_key=api_key)
-            news_text = "\n".join(f"- {t}" for t in news_list) if news_list else "（無最新新聞）"
+            news_text = "\n".join(f"- {title}" for title, _ in news_list) if news_list else "（無最新新聞）"
             prompt = f"""
 以下是 {stock_id} {stock_name} 的最新資訊（資料日期：{latest_date}）：
 - 最新收盤價：{latest_close:.2f}
