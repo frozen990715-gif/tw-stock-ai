@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # 頁面設定（改為寬版面，平板與電腦看多指標圖表更舒適）
-st.set_page_config(page_title="全方位 AI 量化分析系統", page_icon="📈", layout="wide")
+st.set_page_config(page_title="自主學習系統", page_icon="📈", layout="wide")
 
 # 初始化 Session State
 if "ticker_input" not in st.session_state:
@@ -213,9 +213,9 @@ def run_backtest(df: pd.DataFrame, strategy_name: str):
 # 左側邊欄：自選股清單、時間區間、指標開關
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ 看盤設定")
+    st.header("⚙️ 設定")
 
-    st.subheader("⭐ 快捷自選股")
+    st.subheader("⭐ 快捷區")
     watchlist = [
         ("2330", "台積電"),
         ("2454", "聯發科"),
